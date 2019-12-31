@@ -13,6 +13,7 @@
 #include <IO/WriteHelpers.h>
 
 #include <Formats/FormatFactory.h>
+#include <DataTypes/DataTypeString.h>
 #include <DataStreams/IBlockInputStream.h>
 #include <DataStreams/IBlockOutputStream.h>
 #include <DataStreams/AddingDefaultsBlockInputStream.h>
@@ -129,8 +130,13 @@ StorageFile::StorageFile(
         const ConstraintsDescription & constraints_,
         Context & context_,
         const String & compression_method_ = "")
-    :
-    table_name(table_name_), database_name(database_name_), format_name(format_name_), context_global(context_), table_fd(table_fd_), compression_method(compression_method_)
+    : IStorage(ColumnsDescription({{"_path", std::make_shared<DataTypeString>()}}, true))
+    , table_name(table_name_)
+    , database_name(database_name_)
+    , format_name(format_name_)
+    , context_global(context_)
+    , table_fd(table_fd_)
+    , compression_method(compression_method_)
 {
     setColumns(columns_);
     setConstraints(constraints_);
@@ -188,7 +194,7 @@ class StorageFileBlockInputStream : public IBlockInputStream
 public:
     StorageFileBlockInputStream(std::shared_ptr<StorageFile> storage_,
         const Context & context, UInt64 max_block_size,
-        std::string file_path,
+        std::string file_path_,
         const CompressionMethod compression_method)
         : storage(std::move(storage_))
     {
@@ -215,7 +221,8 @@ public:
         else
         {
             shared_lock = std::shared_lock(storage->rwlock);
-            read_buf = getReadBuffer<ReadBufferFromFile>(compression_method, file_path);
+            file_path = std::make_optional(file_path_);
+            read_buf = getReadBuffer<ReadBufferFromFile>(compression_method, file_path.value());
         }
 
         reader = FormatFactory::instance().getInput(storage->format_name, *read_buf, storage->getSampleBlock(), context, max_block_size);
@@ -228,10 +235,19 @@ public:
 
     Block readImpl() override
     {
-        return reader->read();
+        auto res = reader->read();
+        if (res && file_path)
+            res.insert({DataTypeString().createColumnConst(res.rows(), file_path.value()), std::make_shared<DataTypeString>(), "_path"});
+        return res;
     }
 
-    Block getHeader() const override { return reader->getHeader(); }
+    Block getHeader() const override
+    {
+        auto res = reader->getHeader();
+        if (res && file_path)
+            res.insert({DataTypeString().createColumn(), std::make_shared<DataTypeString>(), "_path"});
+        return res;
+    }
 
     void readPrefixImpl() override
     {
@@ -245,6 +261,7 @@ public:
 
 private:
     std::shared_ptr<StorageFile> storage;
+    std::optional<std::string> file_path;
     Block sample_block;
     std::unique_ptr<ReadBuffer> read_buf;
     BlockInputStreamPtr reader;
